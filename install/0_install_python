@@ -1,0 +1,183 @@
+#!/bin/bash
+#
+# This script installs a specific version of Python to /opt/python/Python-<version>.
+#
+
+set -euo pipefail
+
+BUILD_DEP=(
+  libc6-dev
+  bzip2
+  wget
+  build-essential
+  gdb
+  lcov
+  pkg-config
+  libbz2-dev
+  libffi-dev
+  libgdbm-dev
+  libgdbm-compat-dev
+  liblzma-dev
+  libnss3-dev
+  libncurses5-dev
+  libreadline-dev
+  libsqlite3-dev
+  libssl-dev
+  libb2-dev
+  lzma
+  lzma-dev
+  tk-dev
+  uuid-dev
+  zlib1g-dev
+  libncurses-dev
+  libncursesw5-dev
+  libbluetooth-dev
+)
+
+
+PYTHON_SRC_DIR=""
+PYTHON_INSTALL_DIR=""
+PYTHON_EXEC=""
+
+install_pkg () {
+  local pkg="$1"
+  if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+    sudo apt install -y "$pkg"
+  else
+    echo "$pkg is already installed."
+  fi
+}
+
+install_dependencies () {
+  sudo apt update
+  echo
+  install_pkg jq
+  install_pkg curl
+  install_pkg sed
+  sudo apt -y build-dep python3
+  echo
+  echo "Installing additional build dependencies for Python"
+  for a_dep in "${BUILD_DEP[@]}"; do
+    install_pkg "$a_dep"
+  done
+  echo
+}
+
+get_latest_python_version () {
+  local api_url="https://endoflife.date/api/python.json"
+  PYTHON_VERSION_TO_INSTALL=$(curl -s "$api_url" | \
+    jq -r '.[] | select(.cycle | contains(".")) | .latest' | \
+    sort -V | tail -n 1)
+  if [ -n "$PYTHON_VERSION_TO_INSTALL" ]; then
+    echo
+    echo "The latest stable Python version, according to endoflife.date, is: $PYTHON_VERSION_TO_INSTALL"
+    echo
+  else
+    PYTHON_VERSION_TO_INSTALL="3.13.5"
+    echo "Could not determine the latest stable Python version from the API."
+    echo "Please check the endoflife.date Python page manually: https://endoflife.date/python"
+    echo "This script might need an update if the API structure changes or if jq is not installed/working."
+    echo
+    echo "  Using default Python version: $PYTHON_VERSION_TO_INSTALL"
+    echo
+  fi
+}
+
+download_python_source () {
+  PYTHON_SRC_DIR="$HOME/.src/Python-${PYTHON_VERSION_TO_INSTALL}"
+  echo "  Downloading Python ${PYTHON_VERSION_TO_INSTALL} to $HOME/.src"
+  mkdir -p "$HOME/.src"
+  cd "$HOME/.src"
+
+  # download python source if not already downloaded
+  if ! [ -f "Python-${PYTHON_VERSION_TO_INSTALL}.tgz" ] && ! [ -d "$PYTHON_SRC_DIR" ]; then
+    wget -c "https://www.python.org/ftp/python/${PYTHON_VERSION_TO_INSTALL}/Python-${PYTHON_VERSION_TO_INSTALL}.tgz"
+  fi
+
+  # extract source if not already extracted
+  if ! [ -d "$PYTHON_SRC_DIR" ]; then
+    tar -xzvf "Python-${PYTHON_VERSION_TO_INSTALL}.tgz"
+    # wget -c "https://www.python.org/ftp/python/${PYTHON_VERSION_TO_INSTALL}/Python-${PYTHON_VERSION_TO_INSTALL}.tgz" -O - | tar -xz
+  fi
+  echo
+}
+
+build_and_install_python () {
+
+  if ! [ -f $PYTHON_EXEC ]; then
+    echo "  Building and installing Python ${PYTHON_VERSION_TO_INSTALL} to ${PYTHON_INSTALL_DIR}"
+    cd "$PYTHON_SRC_DIR"
+    config_parameters=(
+      --enable-optimizations
+      --with-ensurepip=install
+      --prefix="${PYTHON_INSTALL_DIR}"
+      --exec-prefix="${PYTHON_INSTALL_DIR}"
+    )
+    # "--disable-gil"
+
+    export CC="/usr/bin/gcc"
+
+    # enable large file support and Intel i5-8365U CPU-specific optimizations
+    CFLAGS="${CFLAGS:-}"
+    LDFLAGS="${LDFLAGS:-}"
+    export CFLAGS="-O3 -march=native -pipe -flto -D_FILE_OFFSET_BITS=64 $CFLAGS"
+    export CXXFLAGS="$CFLAGS"
+    export LDFLAGS="-flto $LDFLAGS"
+
+    ./configure "${config_parameters[@]}"
+    make -j $(nproc)
+    sudo make altinstall
+    echo
+
+  else
+    echo
+    echo "  Python ${PYTHON_VERSION_TO_INSTALL} is already installed in ${PYTHON_INSTALL_DIR}"
+    echo
+    return
+  fi
+
+  # # Update PYTHON_VERSION_TO_INSTALL in venv.conf
+  # local venv_conf="venv.conf"
+  # if [[ -f "$venv_conf" ]]; then
+  #   if grep -q '^PYTHON_VERSION_TO_INSTALL=' "$venv_conf"; then
+  #     sed -i "s/^PYTHON_VERSION_TO_INSTALL=.*/PYTHON_VERSION_TO_INSTALL=${PYTHON_VERSION_TO_INSTALL}/" "$venv_conf"
+  #   else
+  #     echo "PYTHON_VERSION_TO_INSTALL=${PYTHON_VERSION_TO_INSTALL}" >> "$venv_conf"
+  #   fi
+  #   echo "Updated PYTHON_VERSION_TO_INSTALL in $venv_conf"
+  # else
+  #   echo "PYTHON_VERSION_TO_INSTALL=${PYTHON_VERSION_TO_INSTALL}" > "$venv_conf"
+  #   echo "Created $venv_conf with PYTHON_VERSION_TO_INSTALL"
+  # fi
+}
+
+cleanup () {
+  if [[ -n "${PYTHON_SRC_DIR:-}" && -d "$PYTHON_SRC_DIR" ]]; then
+    echo "Cleaning up Python source directory: $PYTHON_SRC_DIR"
+    rm -rf "$PYTHON_SRC_DIR"
+  fi
+}
+trap cleanup EXIT
+
+main () {
+  # use existing settings from venv.conf
+  . venv.conf
+
+  # or check for latest stable Python version from endoflife.date
+  # get_latest_python_version
+
+  PYTHON_INSTALL_DIR="/opt/python/${PYTHON_VERSION_TO_INSTALL}"
+  PYTHON_EXEC="${PYTHON_INSTALL_DIR}/bin/python${PYTHON_VERSION_TO_INSTALL%.*}"
+
+  if ! [ -f "${PYTHON_EXEC}" ]; then
+    install_dependencies
+    download_python_source
+    build_and_install_python
+  else
+    echo
+    echo "  Python ${PYTHON_VERSION_TO_INSTALL} is already installed in ${PYTHON_INSTALL_DIR}"
+    echo
+  fi
+}
+
+main "$@"
